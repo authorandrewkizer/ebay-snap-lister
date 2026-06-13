@@ -1,14 +1,30 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
+import { z } from "https://deno.land/x/zod@v3.22.4/mod.ts";
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
 
-interface RequestBody {
-  imageBase64: string;
-  voiceNote?: string;
-}
+const MAX_BODY_BYTES = 2 * 1024 * 1024; // 2MB
+
+const AnalysisSchema = z.object({
+  itemName: z.string(),
+  brand: z.string(),
+  model: z.string(),
+  category: z.string(),
+  condition: z.enum(["New", "Like New", "Good", "Fair", "Poor"]),
+  conditionNotes: z.string(),
+  keySpecs: z.array(z.object({ key: z.string(), value: z.string() })),
+  suggestedTitle: z.string().max(80),
+  description: z.string(),
+  suggested_price_low: z.number(),
+  suggested_price_high: z.number(),
+  price_rationale: z.string(),
+  search_terms: z.string(),
+  identification_confidence: z.enum(["high", "medium", "low"]),
+  missing_info: z.array(z.string()),
+});
 
 serve(async (req: Request) => {
   // Handle CORS preflight
@@ -16,7 +32,25 @@ serve(async (req: Request) => {
     return new Response(null, { headers: corsHeaders });
   }
 
+  // Origin header validation
+  const origin = req.headers.get("Origin");
+  if (!origin) {
+    return new Response(
+      JSON.stringify({ error: "Origin header is required" }),
+      { status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+    );
+  }
+
   try {
+    // Max body size check
+    const contentLength = req.headers.get("content-length");
+    if (contentLength && parseInt(contentLength, 10) > MAX_BODY_BYTES) {
+      return new Response(
+        JSON.stringify({ error: "Request body too large (max 2MB)" }),
+        { status: 413, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
     const OPENROUTER_API_KEY = Deno.env.get("OPENROUTER_API_KEY");
     if (!OPENROUTER_API_KEY) {
       return new Response(
@@ -25,7 +59,18 @@ serve(async (req: Request) => {
       );
     }
 
-    const { imageBase64, voiceNote }: RequestBody = await req.json();
+    const body = await req.json();
+
+    // Additional body size guard after parsing
+    const bodyStr = JSON.stringify(body);
+    if (bodyStr.length > MAX_BODY_BYTES) {
+      return new Response(
+        JSON.stringify({ error: "Request body too large (max 2MB)" }),
+        { status: 413, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    const { imageBase64, voiceNote } = body;
 
     if (!imageBase64) {
       return new Response(
@@ -39,15 +84,18 @@ serve(async (req: Request) => {
   "itemName": "string - common name of the item",
   "brand": "string - brand name or 'Unknown'",
   "model": "string - model name/number or 'Unknown'",
-  "category": "string - best eBay category",
+  "category": "string - best eBay Suggested Category",
   "condition": "New|Like New|Good|Fair|Poor",
   "conditionNotes": "string - any visible wear, damage, or notable condition details",
   "keySpecs": [{"key": "string", "value": "string"}],
   "suggestedTitle": "string - compelling eBay title max 80 chars",
   "description": "string - 3-4 sentence eBay description, mention condition, key features",
-  "estimatedPriceMin": number,
-  "estimatedPriceMax": number,
-  "searchQuery": "string - best search query to find this on eBay"
+  "suggested_price_low": number,
+  "suggested_price_high": number,
+  "price_rationale": "string - brief reason for the price estimate (1-2 sentences)",
+  "search_terms": "string - clean search query: brand + model + item type, no noise words",
+  "identification_confidence": "high|medium|low",
+  "missing_info": ["string - detail that would improve accuracy"]
 }${voiceNote ? `\nAdditional seller notes: "${voiceNote}" - incorporate into description and condition notes.` : ''}
 
 Return ONLY the JSON object. No markdown, no backticks, no explanation.`;
@@ -81,6 +129,7 @@ Return ONLY the JSON object. No markdown, no backticks, no explanation.`;
         ],
         max_tokens: 1500,
         temperature: 0.3,
+        response_format: { type: "json_object" },
       }),
     });
 
@@ -109,10 +158,20 @@ Return ONLY the JSON object. No markdown, no backticks, no explanation.`;
       jsonStr = jsonStr.replace(/^```(?:json)?\n?/, '').replace(/\n?```$/, '');
     }
 
-    const listing = JSON.parse(jsonStr);
+    const rawListing = JSON.parse(jsonStr);
+
+    // Zod validation
+    const parseResult = AnalysisSchema.safeParse(rawListing);
+    if (!parseResult.success) {
+      console.error("Zod validation failed:", parseResult.error);
+      return new Response(
+        JSON.stringify({ error: "AI response did not match expected schema", details: parseResult.error.flatten() }),
+        { status: 502, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
 
     return new Response(
-      JSON.stringify(listing),
+      JSON.stringify(parseResult.data),
       { 
         status: 200, 
         headers: { ...corsHeaders, 'Content-Type': 'application/json' } 

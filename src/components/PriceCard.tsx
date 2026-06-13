@@ -11,7 +11,7 @@ interface PriceCardProps {
 
 export function PriceCard({ analysis, priceResult, isLoading }: PriceCardProps) {
   const suggestedPrice = Math.round(
-    ((analysis.estimatedPriceMin + analysis.estimatedPriceMax) / 2) * 0.95
+    ((analysis.suggested_price_low + analysis.suggested_price_high) / 2) * 0.95
   );
 
   return (
@@ -25,8 +25,11 @@ export function PriceCard({ analysis, priceResult, isLoading }: PriceCardProps) 
       <div className="bg-purple-50 border border-purple-200 rounded-xl p-4">
         <p className="text-sm font-medium text-purple-700 mb-1">🤖 AI Estimate</p>
         <p className="text-2xl font-bold text-purple-900">
-          ${analysis.estimatedPriceMin} – ${analysis.estimatedPriceMax}
+          ${analysis.suggested_price_low} – ${analysis.suggested_price_high}
         </p>
+        {analysis.price_rationale && (
+          <p className="text-xs text-purple-600 mt-1">{analysis.price_rationale}</p>
+        )}
       </div>
 
       {/* eBay Active Listings */}
@@ -37,6 +40,18 @@ export function PriceCard({ analysis, priceResult, isLoading }: PriceCardProps) 
             <Skeleton className="h-6 w-40" />
             <Skeleton className="h-4 w-32" />
           </div>
+        ) : priceResult?.skipped ? (
+          <div className="flex flex-col gap-1">
+            <p className="text-sm text-blue-700 font-medium">
+              Price research unavailable — eBay credentials not configured. Using AI estimate only.
+            </p>
+            <p className="text-xs text-blue-500">
+              AI estimate: ${analysis.suggested_price_low} – ${analysis.suggested_price_high}
+            </p>
+            {analysis.price_rationale && (
+              <p className="text-xs text-blue-400 italic">{analysis.price_rationale}</p>
+            )}
+          </div>
         ) : priceResult ? (
           <>
             <p className="text-2xl font-bold text-blue-900">
@@ -44,6 +59,9 @@ export function PriceCard({ analysis, priceResult, isLoading }: PriceCardProps) 
             </p>
             <p className="text-sm text-blue-600 mt-1">
               {priceResult.activeListings} listings found · avg ${priceResult.averagePrice.toFixed(2)}
+            </p>
+            <p className="text-xs text-blue-400 mt-2 italic">
+              These are current asking prices from active eBay listings, not confirmed sold prices.
             </p>
           </>
         ) : (
@@ -59,7 +77,7 @@ export function PriceCard({ analysis, priceResult, isLoading }: PriceCardProps) 
       </div>
 
       {/* eBay Search Link */}
-      {priceResult && (
+      {priceResult && !priceResult.skipped && (
         <Button
           variant="outline"
           className="gap-2 min-h-[48px] rounded-xl border-[#0064D2] text-[#0064D2] hover:bg-blue-50"

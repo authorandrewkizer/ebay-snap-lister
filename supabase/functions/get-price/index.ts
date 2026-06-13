@@ -6,7 +6,7 @@ const corsHeaders = {
 };
 
 interface RequestBody {
-  searchQuery: string;
+  search_terms: string;
 }
 
 interface eBayItem {
@@ -22,7 +22,17 @@ interface eBaySearchResponse {
   total?: number;
 }
 
+// Module-level OAuth token cache
+let cachedToken: string | null = null;
+let tokenExpiry: number = 0;
+
 async function getEbayToken(clientId: string, clientSecret: string): Promise<string> {
+  const now = Date.now() / 1000; // seconds
+  // Reuse token if it has > 300s remaining
+  if (cachedToken && tokenExpiry - now > 300) {
+    return cachedToken;
+  }
+
   const credentials = btoa(`${clientId}:${clientSecret}`);
   const response = await fetch("https://api.ebay.com/identity/v1/oauth2/token", {
     method: "POST",
@@ -39,7 +49,10 @@ async function getEbayToken(clientId: string, clientSecret: string): Promise<str
   }
 
   const data = await response.json();
-  return data.access_token;
+  cachedToken = data.access_token;
+  // Tokens last ~7200s; store expiry
+  tokenExpiry = now + (data.expires_in ?? 7200);
+  return cachedToken!;
 }
 
 serve(async (req: Request) => {
@@ -48,33 +61,44 @@ serve(async (req: Request) => {
     return new Response(null, { headers: corsHeaders });
   }
 
+  // Origin header validation
+  const origin = req.headers.get("Origin");
+  if (!origin) {
+    return new Response(
+      JSON.stringify({ error: "Origin header is required" }),
+      { status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+    );
+  }
+
   try {
     const EBAY_CLIENT_ID = Deno.env.get("EBAY_CLIENT_ID");
     const EBAY_CLIENT_SECRET = Deno.env.get("EBAY_CLIENT_SECRET");
 
+    // Graceful degradation: missing credentials
     if (!EBAY_CLIENT_ID || !EBAY_CLIENT_SECRET) {
       return new Response(
-        JSON.stringify({ error: "eBay credentials not configured" }),
-        { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        JSON.stringify({ skipped: true, reason: "eBay credentials not configured" }),
+        { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       );
     }
 
-    const { searchQuery }: RequestBody = await req.json();
+    const body: RequestBody = await req.json();
+    const { search_terms } = body;
 
-    if (!searchQuery) {
+    if (!search_terms) {
       return new Response(
-        JSON.stringify({ error: "searchQuery is required" }),
+        JSON.stringify({ error: "search_terms is required" }),
         { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       );
     }
 
-    // Get eBay OAuth token
+    // Get eBay OAuth token (cached)
     const token = await getEbayToken(EBAY_CLIENT_ID, EBAY_CLIENT_SECRET);
 
-    // Search eBay Browse API
-    const encodedQuery = encodeURIComponent(searchQuery);
+    // Build eBay search from search_terms field
+    const encodedQuery = encodeURIComponent(search_terms);
     const searchUrl = `https://www.ebay.com/sch/i.html?_nkw=${encodedQuery}&LH_BIN=1`;
-    const apiUrl = `https://api.ebay.com/buy/browse/v1/item_summary/search?q=${encodedQuery}&limit=20&filter=buyingOptions:{FIXED_PRICE}`;
+    const apiUrl = `https://api.ebay.com/buy/browse/v1/item_summary/search?q=${encodedQuery}&limit=10&filter=buyingOptions:{FIXED_PRICE}`;
 
     const searchResponse = await fetch(apiUrl, {
       headers: {
@@ -103,8 +127,9 @@ serve(async (req: Request) => {
     const searchData: eBaySearchResponse = await searchResponse.json();
     const items = searchData.itemSummaries ?? [];
 
-    // Extract and calculate prices
+    // Extract and calculate prices (max 10 listings)
     const prices: number[] = items
+      .slice(0, 10)
       .map((item) => parseFloat(item.price?.value ?? '0'))
       .filter((price) => price > 0);
 

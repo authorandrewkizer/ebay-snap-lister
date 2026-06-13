@@ -15,9 +15,12 @@ export interface AnalysisResult {
   keySpecs: KeySpec[];
   suggestedTitle: string;
   description: string;
-  estimatedPriceMin: number;
-  estimatedPriceMax: number;
-  searchQuery: string;
+  suggested_price_low: number;
+  suggested_price_high: number;
+  price_rationale: string;
+  search_terms: string;
+  identification_confidence: 'high' | 'medium' | 'low';
+  missing_info: string[];
 }
 
 export interface PriceResult {
@@ -26,6 +29,8 @@ export interface PriceResult {
   averagePrice: number;
   currency: string;
   searchUrl: string;
+  skipped?: boolean;
+  reason?: string;
 }
 
 export interface DraftData {
@@ -38,4 +43,4 @@ export interface DraftData {
   suggestedPrice: number;
 }
 
-export type AppStep = 1 | 2 | 3 | 4;
+export type AppStep = 1 | 2 | 3 | 4 | 5;

@@ -1,6 +1,7 @@
 import { useState, useRef } from 'react';
-import { Mic, MicOff } from 'lucide-react';
+import { Mic } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { Textarea } from '@/components/ui/textarea';
 import { cn } from '@/lib/utils';
 
 interface VoiceNoteProps {
@@ -66,11 +67,18 @@ export function VoiceNote({ onTranscript, transcript }: VoiceNoteProps) {
     setIsListening(false);
   }
 
+  // Web Speech API not available — show plain textarea instead
   if (!isSupported) {
     return (
-      <div className="flex items-center gap-2 text-gray-400 text-sm bg-gray-50 rounded-xl p-4">
-        <MicOff className="w-4 h-4" />
-        <span>Voice not supported on this browser</span>
+      <div className="flex flex-col gap-2">
+        <label className="text-sm font-medium text-gray-700">Additional Notes</label>
+        <Textarea
+          value={transcript}
+          onChange={(e) => onTranscript(e.target.value)}
+          className="rounded-xl border-gray-300"
+          rows={3}
+          placeholder="Add any extra details about your item here"
+        />
       </div>
     );
   }
