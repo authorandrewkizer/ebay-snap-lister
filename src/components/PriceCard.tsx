@@ -14,6 +14,9 @@ export function PriceCard({ analysis, priceResult, isLoading }: PriceCardProps) 
     ((analysis.suggested_price_low + analysis.suggested_price_high) / 2) * 0.95
   );
 
+  const noListingsFound =
+    priceResult && !priceResult.skipped && priceResult.activeListings === 0;
+
   return (
     <div className="flex flex-col gap-4 px-6 py-4">
       <h2 className="text-xl font-bold text-gray-900">Price Research</h2>
@@ -35,12 +38,15 @@ export function PriceCard({ analysis, priceResult, isLoading }: PriceCardProps) 
       {/* eBay Active Listings */}
       <div className="bg-blue-50 border border-blue-200 rounded-xl p-4">
         <p className="text-sm font-medium text-blue-700 mb-1">🛒 Active eBay Listings</p>
+
         {isLoading ? (
           <div className="flex flex-col gap-2 mt-2">
             <Skeleton className="h-6 w-40" />
             <Skeleton className="h-4 w-32" />
           </div>
+
         ) : priceResult?.skipped ? (
+          /* eBay creds missing — graceful degradation */
           <div className="flex flex-col gap-1">
             <p className="text-sm text-blue-700 font-medium">
               Price research unavailable — eBay credentials not configured. Using AI estimate only.
@@ -52,7 +58,23 @@ export function PriceCard({ analysis, priceResult, isLoading }: PriceCardProps) 
               <p className="text-xs text-blue-400 italic">{analysis.price_rationale}</p>
             )}
           </div>
+
+        ) : noListingsFound ? (
+          /* eBay returned 0 results */
+          <div className="flex flex-col gap-1">
+            <p className="text-sm text-blue-700 font-medium">
+              No active listings found. Using AI estimate only.
+            </p>
+            <p className="text-xs text-blue-500">
+              AI estimate: ${analysis.suggested_price_low} – ${analysis.suggested_price_high}
+            </p>
+            {analysis.price_rationale && (
+              <p className="text-xs text-blue-400 italic">{analysis.price_rationale}</p>
+            )}
+          </div>
+
         ) : priceResult ? (
+          /* Normal eBay results */
           <>
             <p className="text-2xl font-bold text-blue-900">
               from ${priceResult.lowestPrice.toFixed(2)}
@@ -64,8 +86,20 @@ export function PriceCard({ analysis, priceResult, isLoading }: PriceCardProps) 
               These are current asking prices from active eBay listings, not confirmed sold prices.
             </p>
           </>
+
         ) : (
-          <p className="text-sm text-blue-500">Could not fetch live prices</p>
+          /* eBay OAuth / network failure — null priceResult after fetch returned */
+          <div className="flex flex-col gap-1">
+            <p className="text-sm text-blue-700 font-medium">
+              Could not fetch eBay prices. Using AI estimate only.
+            </p>
+            <p className="text-xs text-blue-500">
+              AI estimate: ${analysis.suggested_price_low} – ${analysis.suggested_price_high}
+            </p>
+            {analysis.price_rationale && (
+              <p className="text-xs text-blue-400 italic">{analysis.price_rationale}</p>
+            )}
+          </div>
         )}
       </div>
 
@@ -76,8 +110,8 @@ export function PriceCard({ analysis, priceResult, isLoading }: PriceCardProps) 
         <p className="text-xs text-green-600 mt-1">Based on AI estimate (5% below midpoint)</p>
       </div>
 
-      {/* eBay Search Link */}
-      {priceResult && !priceResult.skipped && (
+      {/* eBay Search Link — only when we have real results */}
+      {priceResult && !priceResult.skipped && priceResult.activeListings > 0 && (
         <Button
           variant="outline"
           className="gap-2 min-h-[48px] rounded-xl border-[#0064D2] text-[#0064D2] hover:bg-blue-50"

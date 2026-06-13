@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Plus, Trash2, Copy, Check } from 'lucide-react';
+import { Plus, Trash2, Copy, Check, AlertCircle } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
@@ -11,46 +11,58 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { CopyButton } from '@/components/CopyButton';
-import type { DraftData, Condition, KeySpec } from '@/types/listing';
+import type { ListingDraft as ListingDraftType, Condition, KeySpec } from '@/types/listing';
 
 interface ListingDraftProps {
-  draft: DraftData;
-  onChange: (draft: DraftData) => void;
+  draft: ListingDraftType;
+  onChange: (draft: ListingDraftType) => void;
 }
 
 const CONDITIONS: Condition[] = ['New', 'Like New', 'Good', 'Fair', 'Poor'];
 
 function FieldCopyButton({ value }: { value: string }) {
   const [copied, setCopied] = useState(false);
+  const [copyError, setCopyError] = useState(false);
 
   async function handleCopy() {
+    setCopyError(false);
     try {
       await navigator.clipboard.writeText(value);
       setCopied(true);
       setTimeout(() => setCopied(false), 1500);
     } catch (err) {
-      console.error('Failed to copy:', err);
+      console.error('Failed to copy field:', err);
+      setCopyError(true);
+      setTimeout(() => setCopyError(false), 3000);
     }
   }
 
   return (
-    <button
-      type="button"
-      onClick={handleCopy}
-      className="p-1.5 rounded-lg text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-colors shrink-0"
-      title="Copy to clipboard"
-    >
-      {copied ? (
-        <Check className="w-4 h-4 text-green-500" />
-      ) : (
-        <Copy className="w-4 h-4" />
+    <div className="flex flex-col items-end gap-1">
+      <button
+        type="button"
+        onClick={handleCopy}
+        className="p-1.5 rounded-lg text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-colors shrink-0"
+        title="Copy to clipboard"
+      >
+        {copied ? (
+          <Check className="w-4 h-4 text-green-500" />
+        ) : (
+          <Copy className="w-4 h-4" />
+        )}
+      </button>
+      {copyError && (
+        <div className="flex items-center gap-1">
+          <AlertCircle className="w-3 h-3 text-red-500" />
+          <span className="text-xs text-red-600 whitespace-nowrap">Copy failed</span>
+        </div>
       )}
-    </button>
+    </div>
   );
 }
 
 export function ListingDraft({ draft, onChange }: ListingDraftProps) {
-  function update<K extends keyof DraftData>(key: K, value: DraftData[K]) {
+  function update<K extends keyof ListingDraftType>(key: K, value: ListingDraftType[K]) {
     onChange({ ...draft, [key]: value });
   }
 

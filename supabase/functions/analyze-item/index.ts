@@ -7,6 +7,7 @@ const corsHeaders = {
 };
 
 const MAX_BODY_BYTES = 2 * 1024 * 1024; // 2MB
+const TIMEOUT_MS = 25_000; // 25-second hard timeout
 
 const AnalysisSchema = z.object({
   itemName: z.string(),
@@ -26,6 +27,16 @@ const AnalysisSchema = z.object({
   missing_info: z.array(z.string()),
 });
 
+/** Race a promise against a timeout. Throws 'timeout' error on expiry. */
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error('timeout')), ms)
+    ),
+  ]);
+}
+
 serve(async (req: Request) => {
   // Handle CORS preflight
   if (req.method === 'OPTIONS') {
@@ -41,17 +52,17 @@ serve(async (req: Request) => {
     );
   }
 
-  try {
-    // Max body size check
-    const contentLength = req.headers.get("content-length");
-    if (contentLength && parseInt(contentLength, 10) > MAX_BODY_BYTES) {
-      return new Response(
-        JSON.stringify({ error: "Request body too large (max 2MB)" }),
-        { status: 413, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-      );
-    }
+  // Max body size check (content-length header guard)
+  const contentLength = req.headers.get("content-length");
+  if (contentLength && parseInt(contentLength, 10) > MAX_BODY_BYTES) {
+    return new Response(
+      JSON.stringify({ error: "Request body too large (max 2MB)" }),
+      { status: 413, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+    );
+  }
 
-    const OPENROUTER_API_KEY = Deno.env.get("OPENROUTER_API_KEY");
+  try {
+    const OPENROUTER_API_KEY = ***"OPENROUTER_API_KEY");
     if (!OPENROUTER_API_KEY) {
       return new Response(
         JSON.stringify({ error: "OPENROUTER_API_KEY not configured" }),
@@ -62,8 +73,7 @@ serve(async (req: Request) => {
     const body = await req.json();
 
     // Additional body size guard after parsing
-    const bodyStr = JSON.stringify(body);
-    if (bodyStr.length > MAX_BODY_BYTES) {
+    if (JSON.stringify(body).length > MAX_BODY_BYTES) {
       return new Response(
         JSON.stringify({ error: "Request body too large (max 2MB)" }),
         { status: 413, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
@@ -100,38 +110,48 @@ serve(async (req: Request) => {
 
 Return ONLY the JSON object. No markdown, no backticks, no explanation.`;
 
-    const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${OPENROUTER_API_KEY}`,
-        "Content-Type": "application/json",
-        "HTTP-Referer": "https://ebay-snap-lister.app",
-        "X-Title": "eBay Snap Lister",
-      },
-      body: JSON.stringify({
-        model: "google/gemini-2.5-flash",
-        messages: [
-          {
-            role: "user",
-            content: [
+    // Wrap the OpenRouter call in a 25-second timeout
+    let response: Response;
+    try {
+      response = await withTimeout(
+        fetch("https://openrouter.ai/api/v1/chat/completions", {
+          method: "POST",
+          headers: {
+            "Authorization": `Bearer ${OPENROUTER_API_KEY}`,
+            "Content-Type": "application/json",
+            "HTTP-Referer": "https://ebay-snap-lister.app",
+            "X-Title": "eBay Snap Lister",
+          },
+          body: JSON.stringify({
+            model: "google/gemini-2.5-flash",
+            messages: [
               {
-                type: "image_url",
-                image_url: {
-                  url: `data:image/jpeg;base64,${imageBase64}`,
-                },
-              },
-              {
-                type: "text",
-                text: prompt,
+                role: "user",
+                content: [
+                  {
+                    type: "image_url",
+                    image_url: { url: `data:image/jpeg;base64,${imageBase64}` },
+                  },
+                  { type: "text", text: prompt },
+                ],
               },
             ],
-          },
-        ],
-        max_tokens: 1500,
-        temperature: 0.3,
-        response_format: { type: "json_object" },
-      }),
-    });
+            max_tokens: 1500,
+            temperature: 0.3,
+            response_format: { type: "json_object" },
+          }),
+        }),
+        TIMEOUT_MS
+      );
+    } catch (err) {
+      if ((err as Error).message === 'timeout') {
+        return new Response(
+          JSON.stringify({ error: "Analysis timed out. Please try again." }),
+          { status: 504, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        );
+      }
+      throw err;
+    }
 
     if (!response.ok) {
       const errorText = await response.text();
@@ -165,17 +185,17 @@ Return ONLY the JSON object. No markdown, no backticks, no explanation.`;
     if (!parseResult.success) {
       console.error("Zod validation failed:", parseResult.error);
       return new Response(
-        JSON.stringify({ error: "AI response did not match expected schema", details: parseResult.error.flatten() }),
+        JSON.stringify({
+          error: "AI response did not match expected schema",
+          details: parseResult.error.flatten(),
+        }),
         { status: 502, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       );
     }
 
     return new Response(
       JSON.stringify(parseResult.data),
-      { 
-        status: 200, 
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
-      }
+      { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
     );
   } catch (error) {
     console.error("Unexpected error:", error);

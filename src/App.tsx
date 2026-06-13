@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { ChevronLeft } from 'lucide-react';
+import { ChevronLeft, RefreshCw } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { PhotoCapture } from '@/components/PhotoCapture';
@@ -8,10 +8,26 @@ import { VoiceNote } from '@/components/VoiceNote';
 import { PriceCard } from '@/components/PriceCard';
 import { ListingDraft } from '@/components/ListingDraft';
 import { cn } from '@/lib/utils';
-import type { AppStep, AnalysisResult, PriceResult, DraftData } from '@/types/listing';
+import type { AppStep, AnalysisResult, PriceResult, ListingDraft as ListingDraftType } from '@/types/listing';
 
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL ?? '';
 const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY ?? '';
+
+/** Fetch with a hard client-side timeout (ms). Throws on timeout. */
+async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } catch (err) {
+    if ((err as Error).name === 'AbortError') {
+      throw new Error('timeout');
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 const STEP_LABELS: Record<AppStep, string> = {
   1: 'Photo',
@@ -21,7 +37,7 @@ const STEP_LABELS: Record<AppStep, string> = {
   5: 'Review',
 };
 
-function analysisToDefaultDraft(analysis: AnalysisResult): DraftData {
+function analysisToDefaultDraft(analysis: AnalysisResult): ListingDraftType {
   const suggestedPrice = Math.round(
     ((analysis.suggested_price_low + analysis.suggested_price_high) / 2) * 0.95
   );
@@ -166,13 +182,23 @@ function ConfirmationStep({ analysis, onConfirm }: ConfirmationStepProps) {
   );
 }
 
+/** Map raw error messages to friendly UI copy. */
+function friendlyAnalysisError(err: unknown): string {
+  const msg = err instanceof Error ? err.message : String(err);
+  if (msg === 'timeout') return 'Analysis timed out. Please try again.';
+  if (msg.includes('schema') || msg.includes('Zod') || msg.includes('validation')) {
+    return 'Could not read item details. Please try again.';
+  }
+  return 'Analysis failed. Please try again.';
+}
+
 export default function App() {
   const [step, setStep] = useState<AppStep>(1);
   const [imageBase64, setImageBase64] = useState<string>('');
   const [voiceNote, setVoiceNote] = useState<string>('');
   const [analysisResult, setAnalysisResult] = useState<AnalysisResult | null>(null);
   const [priceResult, setPriceResult] = useState<PriceResult | null>(null);
-  const [draft, setDraft] = useState<DraftData | null>(null);
+  const [draft, setDraft] = useState<ListingDraftType | null>(null);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [isFetchingPrice, setIsFetchingPrice] = useState(false);
   const [analysisError, setAnalysisError] = useState<string>('');
@@ -182,26 +208,36 @@ export default function App() {
     setIsAnalyzing(true);
     setAnalysisError('');
     try {
-      const res = await fetch(`${SUPABASE_URL}/functions/v1/analyze-item`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
-          'apikey': SUPABASE_ANON_KEY,
+      const res = await fetchWithTimeout(
+        `${SUPABASE_URL}/functions/v1/analyze-item`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
+            'apikey': SUPABASE_ANON_KEY,
+          },
+          body: JSON.stringify({ imageBase64, voiceNote: voiceNote || undefined }),
         },
-        body: JSON.stringify({ imageBase64, voiceNote: voiceNote || undefined }),
-      });
+        30_000 // 30s client-side guard (edge fn has its own 25s)
+      );
+
       if (!res.ok) {
         const errText = await res.text();
+        // Surface Zod / schema errors with friendly copy
+        if (errText.includes('schema') || errText.includes('validation')) {
+          throw new Error('schema');
+        }
         throw new Error(errText || `HTTP ${res.status}`);
       }
+
       const data: AnalysisResult = await res.json();
       setAnalysisResult(data);
       setDraft(analysisToDefaultDraft(data));
       setStep(3); // Go to confirmation step
     } catch (err) {
       console.error('Analysis failed:', err);
-      setAnalysisError(err instanceof Error ? err.message : 'Analysis failed. Please try again.');
+      setAnalysisError(friendlyAnalysisError(err));
     } finally {
       setIsAnalyzing(false);
     }
@@ -210,19 +246,28 @@ export default function App() {
   async function fetchPrice(searchTerms: string) {
     setIsFetchingPrice(true);
     try {
-      const res = await fetch(`${SUPABASE_URL}/functions/v1/get-price`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
-          'apikey': SUPABASE_ANON_KEY,
+      const res = await fetchWithTimeout(
+        `${SUPABASE_URL}/functions/v1/get-price`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
+            'apikey': SUPABASE_ANON_KEY,
+          },
+          body: JSON.stringify({ search_terms: searchTerms }),
         },
-        body: JSON.stringify({ search_terms: searchTerms }),
-      });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        30_000
+      );
+      if (!res.ok) {
+        // eBay OAuth / server failure — graceful: show AI estimate only, no crash
+        console.warn('Price fetch HTTP error:', res.status);
+        return;
+      }
       const data: PriceResult = await res.json();
       setPriceResult(data);
     } catch (err) {
+      // Network / timeout — swallow; PriceCard will show AI estimate fallback
       console.error('Price fetch failed:', err);
     } finally {
       setIsFetchingPrice(false);
@@ -302,9 +347,20 @@ export default function App() {
               transcript={voiceNote}
             />
 
+            {/* Analysis error with retry */}
             {analysisError && (
-              <div className="bg-red-50 border border-red-200 rounded-xl p-3 text-sm text-red-700">
-                {analysisError}
+              <div className="bg-red-50 border border-red-200 rounded-xl p-4 flex flex-col gap-3">
+                <p className="text-sm text-red-700">{analysisError}</p>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="self-start gap-2 rounded-xl border-red-300 text-red-600 hover:bg-red-100"
+                  onClick={analyzeImage}
+                  disabled={isAnalyzing}
+                >
+                  <RefreshCw className="w-4 h-4" />
+                  Try again
+                </Button>
               </div>
             )}
 

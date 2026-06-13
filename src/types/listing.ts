@@ -33,7 +33,8 @@ export interface PriceResult {
   reason?: string;
 }
 
-export interface DraftData {
+/** Single shared draft type — used by the frontend listing editor. */
+export interface ListingDraft {
   title: string;
   category: string;
   condition: Condition;
@@ -42,5 +43,8 @@ export interface DraftData {
   description: string;
   suggestedPrice: number;
 }
+
+// Backward-compat alias — prefer ListingDraft in new code.
+export type DraftData = ListingDraft;
 
 export type AppStep = 1 | 2 | 3 | 4 | 5;

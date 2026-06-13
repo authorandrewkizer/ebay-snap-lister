@@ -5,6 +5,8 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
 
+const TIMEOUT_MS = 25_000; // 25-second hard timeout
+
 interface RequestBody {
   search_terms: string;
 }
@@ -25,6 +27,16 @@ interface eBaySearchResponse {
 // Module-level OAuth token cache
 let cachedToken: string | null = null;
 let tokenExpiry: number = 0;
+
+/** Race a promise against a timeout. Throws 'timeout' error on expiry. */
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error('timeout')), ms)
+    ),
+  ]);
+}
 
 async function getEbayToken(clientId: string, clientSecret: string): Promise<string> {
   const now = Date.now() / 1000; // seconds
@@ -72,7 +84,7 @@ serve(async (req: Request) => {
 
   try {
     const EBAY_CLIENT_ID = Deno.env.get("EBAY_CLIENT_ID");
-    const EBAY_CLIENT_SECRET = Deno.env.get("EBAY_CLIENT_SECRET");
+    const EBAY_CLIENT_SECRET = ***"EBAY_CLIENT_SECRET");
 
     // Graceful degradation: missing credentials
     if (!EBAY_CLIENT_ID || !EBAY_CLIENT_SECRET) {
@@ -92,27 +104,63 @@ serve(async (req: Request) => {
       );
     }
 
-    // Get eBay OAuth token (cached)
-    const token = await getEbayToken(EBAY_CLIENT_ID, EBAY_CLIENT_SECRET);
+    // Get eBay OAuth token (cached). Wrap in timeout.
+    let token: string;
+    try {
+      token = await withTimeout(getEbayToken(EBAY_CLIENT_ID, EBAY_CLIENT_SECRET), TIMEOUT_MS);
+    } catch (err) {
+      if ((err as Error).message === 'timeout') {
+        return new Response(
+          JSON.stringify({ error: "eBay authentication timed out. Please try again." }),
+          { status: 504, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        );
+      }
+      // eBay OAuth failure — return graceful response so frontend shows AI estimate
+      console.error("eBay OAuth failure:", err);
+      return new Response(
+        JSON.stringify({
+          activeListings: 0,
+          lowestPrice: 0,
+          averagePrice: 0,
+          currency: "USD",
+          searchUrl: `https://www.ebay.com/sch/i.html?_nkw=${encodeURIComponent(search_terms)}&LH_BIN=1`,
+        }),
+        { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
 
     // Build eBay search from search_terms field
     const encodedQuery = encodeURIComponent(search_terms);
     const searchUrl = `https://www.ebay.com/sch/i.html?_nkw=${encodedQuery}&LH_BIN=1`;
     const apiUrl = `https://api.ebay.com/buy/browse/v1/item_summary/search?q=${encodedQuery}&limit=10&filter=buyingOptions:{FIXED_PRICE}`;
 
-    const searchResponse = await fetch(apiUrl, {
-      headers: {
-        "Authorization": `Bearer ${token}`,
-        "Content-Type": "application/json",
-        "X-EBAY-C-MARKETPLACE-ID": "EBAY_US",
-      },
-    });
+    let searchResponse: Response;
+    try {
+      searchResponse = await withTimeout(
+        fetch(apiUrl, {
+          headers: {
+            "Authorization": `Bearer ${token}`,
+            "Content-Type": "application/json",
+            "X-EBAY-C-MARKETPLACE-ID": "EBAY_US",
+          },
+        }),
+        TIMEOUT_MS
+      );
+    } catch (err) {
+      if ((err as Error).message === 'timeout') {
+        return new Response(
+          JSON.stringify({ error: "eBay search timed out. Please try again." }),
+          { status: 504, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        );
+      }
+      throw err;
+    }
 
     if (!searchResponse.ok) {
       const errorText = await searchResponse.text();
       console.error("eBay search error:", errorText);
       return new Response(
-        JSON.stringify({ 
+        JSON.stringify({
           error: `eBay search failed: ${searchResponse.status}`,
           activeListings: 0,
           lowestPrice: 0,
@@ -149,10 +197,7 @@ serve(async (req: Request) => {
         currency,
         searchUrl,
       }),
-      { 
-        status: 200, 
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
-      }
+      { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
     );
   } catch (error) {
     console.error("Unexpected error:", error);
